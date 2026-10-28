@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+node_modules/
+.next/
+out/
+dist/
+.env
+.env.*
+*.pdf
+*.db
+*.sqlite3
+.DS_Store
+__pycache__/
