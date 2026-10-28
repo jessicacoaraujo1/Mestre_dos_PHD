@@ -6,6 +6,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
 const tabs = [
   { id: 'home', label: 'Home' },
+  { id: 'dashboard', label: 'Dashboard' },
   { id: 'cadastro', label: 'Cadastro' },
   { id: 'login', label: 'Login' },
   { id: 'pagamento', label: 'Pagamento' },
@@ -66,10 +67,34 @@ const pricing = [
   },
 ];
 
+const defaultDashboard = {
+  summary: [
+    { label: 'Programas salvos', value: '24', delta: '+6 esta semana' },
+    { label: 'Alertas ativos', value: '12', delta: '3 críticos' },
+    { label: 'Taxa de resposta', value: '98%', delta: 'em tempo real' },
+    { label: 'Apostilas geradas', value: '08', delta: '+2 hoje' },
+  ],
+  alerts: [
+    { title: 'Mestrado em Economia - USP', status: 'Abriu inscrição', time: 'Há 1h' },
+    { title: 'Doutorado em Direito - UFRJ', status: 'Prazo em 5 dias', time: 'Hoje' },
+    { title: 'Pós em Administração - UFPA', status: 'Nova revisão de edital', time: 'Ontem' },
+  ],
+  favorites: [
+    { name: 'Mestrado em Economia', uf: 'SP', score: '5.0', track: 'Alta prioridade' },
+    { name: 'Doutorado em Direito', uf: 'RJ', score: '4.9', track: 'Em alerta' },
+    { name: 'Pós em Administração', uf: 'PA', score: '4.8', track: 'Acompanhando' },
+  ],
+  studyPlan: [
+    { subject: 'Economia', progress: '82%' },
+    { subject: 'Direito', progress: '65%' },
+    { subject: 'Metodologia', progress: '49%' },
+  ],
+};
+
 export default function PremiumLandingPage() {
   const [activeTab, setActiveTab] = useState('home');
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
-  const [user, setUser] = useState<{ name: string; email: string } | null>(null);
+  const [user, setUser] = useState<{ name: string; email: string; plan?: string; premium?: boolean } | null>(null);
   const [authForm, setAuthForm] = useState({
     name: '',
     email: '',
@@ -82,14 +107,35 @@ export default function PremiumLandingPage() {
     cvv: '',
     cpf: '',
   });
+  const [dashboardData, setDashboardData] = useState(defaultDashboard);
 
   useEffect(() => {
     const stored = localStorage.getItem('editalhub-user');
     if (stored) {
       setUser(JSON.parse(stored));
-      setActiveTab('home');
+      setActiveTab('dashboard');
     }
   }, []);
+
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+
+    const loadDashboard = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/api/dashboard/overview`);
+        if (response.ok) {
+          const data = await response.json();
+          setDashboardData(data);
+        }
+      } catch {
+        setDashboardData(defaultDashboard);
+      }
+    };
+
+    loadDashboard();
+  }, [user]);
 
   const signIn = async () => {
     try {
@@ -105,10 +151,15 @@ export default function PremiumLandingPage() {
         return;
       }
 
-      const nextUser = { name: data.name || 'Usuário', email: data.email || authForm.email };
+      const nextUser = {
+        name: data.name || 'Usuário',
+        email: data.email || authForm.email,
+        plan: 'Starter',
+        premium: false,
+      };
       localStorage.setItem('editalhub-user', JSON.stringify(nextUser));
       setUser(nextUser);
-      setActiveTab('home');
+      setActiveTab('dashboard');
       alert('Login realizado com sucesso!');
     } catch {
       alert('Não foi possível conectar ao backend.');
@@ -133,10 +184,15 @@ export default function PremiumLandingPage() {
         return;
       }
 
-      const nextUser = { name: data.name || authForm.name, email: data.email || authForm.email };
+      const nextUser = {
+        name: data.name || authForm.name,
+        email: data.email || authForm.email,
+        plan: 'Starter',
+        premium: false,
+      };
       localStorage.setItem('editalhub-user', JSON.stringify(nextUser));
       setUser(nextUser);
-      setActiveTab('home');
+      setActiveTab('dashboard');
       alert('Conta criada com sucesso!');
     } catch {
       alert('Não foi possível conectar ao backend.');
@@ -166,11 +222,27 @@ export default function PremiumLandingPage() {
         return;
       }
 
+      const nextUser = { ...(user || { name: 'Cliente', email: authForm.email || 'cliente@editalhub.com' }), plan: 'Pro', premium: true };
+      setUser(nextUser);
+      localStorage.setItem('editalhub-user', JSON.stringify(nextUser));
       alert(`Pagamento confirmado: ${data.status || 'sucesso'}.`);
-      setActiveTab('home');
+      setActiveTab('dashboard');
+      setCheckoutForm({
+        cardName: '',
+        cardNumber: '',
+        expiry: '',
+        cvv: '',
+        cpf: '',
+      });
     } catch {
       alert('Checkout indisponível no momento.');
     }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('editalhub-user');
+    setUser(null);
+    setActiveTab('home');
   };
 
   return (
@@ -202,8 +274,8 @@ export default function PremiumLandingPage() {
         </nav>
 
         <div className="nav-actions">
-          <button className="ghost-button" type="button">Entrar</button>
-          <button className="primary-button" type="button">Começar</button>
+          <button className="ghost-button" type="button" onClick={() => setActiveTab('login')}>Entrar</button>
+          <button className="primary-button" type="button" onClick={() => setActiveTab('cadastro')}>Começar</button>
         </div>
       </header>
 
@@ -452,9 +524,100 @@ export default function PremiumLandingPage() {
             </div>
           </section>
         )}
-      </main>
 
-      
+        {activeTab === 'dashboard' && user && (
+          <section className="dashboard-shell">
+            <div className="dashboard-header">
+              <div>
+                <span className="eyebrow muted">Painel do cliente</span>
+                <h2>Bem-vindo, {user.name.split(' ')[0]}.</h2>
+              </div>
+              <div className="dashboard-actions">
+                <span className="badge-plan">{user.plan || 'Starter'}</span>
+                <button className="secondary-button" type="button" onClick={handleLogout}>Sair</button>
+              </div>
+            </div>
+
+            <div className="dashboard-grid">
+              {dashboardData.summary.map((item) => (
+                <div key={item.label} className="dashboard-card">
+                  <span>{item.label}</span>
+                  <strong>{item.value}</strong>
+                  <small>{item.delta}</small>
+                </div>
+              ))}
+            </div>
+
+            <div className="dashboard-main">
+              <div className="glass-panel">
+                <div className="panel-header compact-header">
+                  <div>
+                    <p className="panel-label">Alertas</p>
+                    <h3>Oportunidades em tempo real</h3>
+                  </div>
+                  <button className="mini-button" type="button">Ver tudo</button>
+                </div>
+                <div className="alert-list">
+                  {dashboardData.alerts.map((alert) => (
+                    <div key={alert.title} className="list-row">
+                      <div>
+                        <strong>{alert.title}</strong>
+                        <small>{alert.status}</small>
+                      </div>
+                      <span>{alert.time}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="glass-panel">
+                <div className="panel-header compact-header">
+                  <div>
+                    <p className="panel-label">Favoritos</p>
+                    <h3>Programas em foco</h3>
+                  </div>
+                </div>
+                <div className="favorites-list">
+                  {dashboardData.favorites.map((program) => (
+                    <div key={program.name} className="favorite-item">
+                      <div>
+                        <strong>{program.name}</strong>
+                        <small>{program.uf}</small>
+                      </div>
+                      <div className="favorite-meta">
+                        <span>Nota {program.score}</span>
+                        <em>{program.track}</em>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="study-panel glass-panel">
+              <div className="panel-header compact-header">
+                <div>
+                  <p className="panel-label">Estudos</p>
+                  <h3>Plano de revisão</h3>
+                </div>
+              </div>
+              <div className="study-list">
+                {dashboardData.studyPlan.map((item) => (
+                  <div key={item.subject} className="study-item">
+                    <div className="study-topline">
+                      <span>{item.subject}</span>
+                      <strong>{item.progress}</strong>
+                    </div>
+                    <div className="progress-bar">
+                      <span style={{ width: item.progress }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+        )}
+      </main>
     </div>
   );
 }

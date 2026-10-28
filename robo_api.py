@@ -349,6 +349,33 @@ def overview():
     }
 
 
+@app.get("/api/dashboard/overview")
+def dashboard_overview():
+    return {
+        "summary": [
+            {"label": "Programas salvos", "value": "24", "delta": "+6 esta semana"},
+            {"label": "Alertas ativos", "value": "12", "delta": "3 críticos"},
+            {"label": "Taxa de resposta", "value": "98%", "delta": "em tempo real"},
+            {"label": "Apostilas geradas", "value": "08", "delta": "+2 hoje"},
+        ],
+        "alerts": [
+            {"title": "Mestrado em Economia - USP", "status": "Abriu inscrição", "time": "Há 1h"},
+            {"title": "Doutorado em Direito - UFRJ", "status": "Prazo em 5 dias", "time": "Hoje"},
+            {"title": "Pós em Administração - UFPA", "status": "Nova revisão de edital", "time": "Ontem"},
+        ],
+        "favorites": [
+            {"name": "Mestrado em Economia", "uf": "SP", "score": "5.0", "track": "Alta prioridade"},
+            {"name": "Doutorado em Direito", "uf": "RJ", "score": "4.9", "track": "Em alerta"},
+            {"name": "Pós em Administração", "uf": "PA", "score": "4.8", "track": "Acompanhando"},
+        ],
+        "studyPlan": [
+            {"subject": "Economia", "progress": "82%"},
+            {"subject": "Direito", "progress": "65%"},
+            {"subject": "Metodologia", "progress": "49%"},
+        ],
+    }
+
+
 @app.get("/api/programas", response_model=List[ProgramaPosGraduacao])
 def listar_programas(
     uf: Optional[str] = Query(None),
