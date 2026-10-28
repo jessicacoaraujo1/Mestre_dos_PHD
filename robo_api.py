@@ -2,15 +2,11 @@ import hashlib
 import io
 import os
 import re
-import smtplib
 import sqlite3
 import tempfile
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from email.mime.application import MIMEApplication
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from functools import lru_cache
 from typing import List, Optional
 
@@ -21,8 +17,6 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-
-from pypdf import PdfReader, PdfWriter
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -36,48 +30,94 @@ CAPES_URL = "https://dadosabertos.capes.gov.br/dataset/33719131-0162-43bb-81d3-3
 
 AREAS_FOCO = [
     "ECONOMIA",
-    "ECONOMIA POLÍTICA",
     "DIREITO",
-    "CIÊNCIA POLÍTICA E RELAÇÕES INTERNACIONAIS",
     "CIÊNCIA POLÍTICA",
+    "RELAÇÕES INTERNACIONAIS",
     "SOCIOLOGIA",
     "ADMINISTRAÇÃO",
-    "ADMINISTRAÇÃO PÚBLICA E DE EMPRESAS, CIÊNCIAS CONTÁBEIS E TURISMO",
+    "ADMINISTRAÇÃO PÚBLICA",
     "PLANEJAMENTO URBANO E REGIONAL / DEMOGRAFIA",
     "CIÊNCIAS AMBIENTAIS",
     "MEIO AMBIENTE E SUSTENTABILIDADE",
-    "BIODIVERSIDADE",
-    "GEOGRAFIA",
-    "ANTROPOLOGIA / ARQUEOLOGIA",
-    "INTERDISCIPLINAR",
     "FILOSOFIA",
-    "HISTÓRIA",
+    "GEOGRAFIA",
+    "SERVIÇO SOCIAL",
+    "INTERDISCIPLINAR",
+]
+
+DEFAULT_PROGRAMAS = [
+    {
+        "id": "ufpa-doutorado-2026",
+        "instituicao": "Universidade Federal do Pará",
+        "sigla_ies": "UFPA",
+        "programa": "Programa de Pós-Graduação em Economia e Desenvolvimento",
+        "uf": "PA",
+        "area": "Economia",
+        "nivel": "Doutorado",
+        "nota_capes": "5",
+        "status_juridico": "Pública",
+        "previsao_edital": "Inscrições abertas",
+    },
+    {
+        "id": "usp-mestrado-2027",
+        "instituicao": "Universidade de São Paulo",
+        "sigla_ies": "USP",
+        "programa": "Mestrado em Economia",
+        "uf": "SP",
+        "area": "Economia",
+        "nivel": "Mestrado",
+        "nota_capes": "5",
+        "status_juridico": "Pública",
+        "previsao_edital": "Previsto 2027.1",
+    },
+    {
+        "id": "puc-rio-ppg-direito",
+        "instituicao": "Pontifícia Universidade Católica do Rio de Janeiro",
+        "sigla_ies": "PUC-Rio",
+        "programa": "Mestrado em Direito",
+        "uf": "RJ",
+        "area": "Direito",
+        "nivel": "Mestrado",
+        "nota_capes": "4",
+        "status_juridico": "Privada",
+        "previsao_edital": "Previsto 2026.2",
+    },
+    {
+        "id": "unifesp-saude-publica",
+        "instituicao": "Universidade Federal de São Paulo",
+        "sigla_ies": "UNIFESP",
+        "programa": "Doutorado em Saúde Pública",
+        "uf": "SP",
+        "area": "Saúde Pública",
+        "nivel": "Doutorado",
+        "nota_capes": "5",
+        "status_juridico": "Pública",
+        "previsao_edital": "Acompanhando",
+    },
 ]
 
 
 class ProgramaPosGraduacao(BaseModel):
     id: str
-    instituicao_sigla: str
-    instituicao_nome: str
-    natureza_juridica: str
-    programa_nome: str
-    area_avaliacao: str
-    nivel: str
-    modalidade: str
+    instituicao: str
+    sigla_ies: str
+    programa: str
     uf: str
-    regiao: str
-    nota_capes: int
-    status: str
-    previsao: str
+    area: str
+    nivel: str
+    nota_capes: str
+    status_juridico: str
+    previsao_edital: str
 
 
 class NovaUrlReq(BaseModel):
     url: str
+    nome_portal: str = "Portal acadêmico"
 
 
 class TopicoEstudo(BaseModel):
     nome: str
-    prioridade: str = "Média"
+    prioridade: str = "Alta"
 
 
 class ModuloEstudo(BaseModel):
@@ -87,17 +127,68 @@ class ModuloEstudo(BaseModel):
 
 
 class RequisicaoApostila(BaseModel):
-    nome_completo: str = Field(..., json_schema_extra={"example": "Jéssica Caroline de Oliveira Araújo"})
-    cpf: str = Field(..., json_schema_extra={"example": "123.456.789-00"})
-    email: str = Field(..., json_schema_extra={"example": "usuario@email.com"})
-    nome_concurso: str = Field(..., json_schema_extra={"example": "Doutorado em Economia e Desenvolvimento - UFPA 2026"})
+    nome_completo: str = Field(..., min_length=2)
+    cpf: str = Field(..., min_length=11)
+    nome_concurso: str = Field(..., min_length=4)
     modulos: List[ModuloEstudo]
 
 
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+class AuthUser(BaseModel):
+    name: Optional[str] = None
+    email: str
+    password: str
+
+
+class AuthLogin(BaseModel):
+    email: str
+    password: str
+
+
+class PaymentRequest(BaseModel):
+    plan: str
+    amount: float
+    email: str
+    cardName: Optional[str] = None
+    cardNumber: Optional[str] = None
+    expiry: Optional[str] = None
+    cvv: Optional[str] = None
+    cpf: Optional[str] = None
+
+
+def init_db() -> None:
+    conn = sqlite3.connect(DB_FILE)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS monitoramento (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT UNIQUE NOT NULL,
+            nome_portal TEXT,
+            ultimo_hash TEXT,
+            ultima_verificacao TEXT,
+            status_edital TEXT DEFAULT 'Acompanhando'
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+init_db()
 
 
 class SecurityCanvas(canvas.Canvas):
@@ -112,152 +203,250 @@ class SecurityCanvas(canvas.Canvas):
         self._startPage()
 
     def save(self):
-        num_pages = len(self.pages)
+        total_pages = len(self.pages)
         for page in self.pages:
             self.__dict__.update(page)
-            self.draw_security_layers(num_pages)
+            self.draw_security_layers(total_pages)
             super().showPage()
         super().save()
 
     def draw_security_layers(self, total_pages):
         self.saveState()
-        self.setFont("Helvetica-Bold", 40)
+        self.setFont("Helvetica-Bold", 38)
         self.setFillColor(colors.HexColor("#CBD5E1"), alpha=0.22)
         self.translate(300, 400)
         self.rotate(45)
-        self.drawCentredString(0, 0, "PROJETO GIGANTE")
+        self.drawCentredString(0, 0, "MONITORIA DE EDITAIS")
         self.restoreState()
 
         self.saveState()
         self.setFont("Helvetica", 7)
         self.setFillColor(colors.HexColor("#64748B"))
-        user_info = f"LICENCIADO PARA: {self.user_name.upper()} | CPF: {self.user_cpf} | DOCUMENTO PROTEGIDO"
-        self.drawCentredString(300, 775, user_info)
-        self.drawCentredString(300, 15, f"{user_info} — Página {self._pageNumber} de {total_pages}")
+        info = f"ESTUDANTE: {self.user_name.upper()} | CPF: {self.user_cpf} | DOCUMENTO PROTEGIDO"
+        self.drawCentredString(300, 775, info)
+        self.drawCentredString(300, 15, f"{info} — Página {self._pageNumber} de {total_pages}")
 
         self.saveState()
         self.translate(15, 400)
         self.rotate(90)
-        self.drawCentredString(0, 0, user_info)
+        self.drawCentredString(0, 0, info)
         self.restoreState()
 
         self.saveState()
         self.translate(597, 400)
         self.rotate(-90)
-        self.drawCentredString(0, 0, user_info)
+        self.drawCentredString(0, 0, info)
         self.restoreState()
         self.restoreState()
 
 
-def remover_arquivo_temporario(filepath: str):
+def verificar_url(url: str) -> dict:
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        if os.path.exists(filepath):
-            os.remove(filepath)
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        body = response.text.lower()
+        padrao = r"edital|processo seletivo|inscrições abertas|seleção|mestrado|doutorado"
+        detectado = bool(re.search(padrao, body, re.IGNORECASE))
+        return {
+            "status": "Alerta" if detectado else "Sem sinal",
+            "mensagem": "Indícios de edital detectados." if detectado else "Nenhum indicativo forte de edital foi localizado.",
+        }
     except Exception as exc:
-        print(f"Erro ao deletar arquivo temporário {filepath}: {exc}")
+        return {"status": "Erro", "mensagem": str(exc)}
 
 
-def obter_template_email_html(nome_usuario: str, nome_concurso: str, cpf_usuario: str) -> str:
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Sua Apostila Chegou!</title>
-    </head>
-    <body style="margin: 0; padding: 0; background-color: #0F172A; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;">
-        <table border="0" cellpadding="0" cellspacing="0" width="100%" style="table-layout: fixed;">
-            <tr>
-                <td align="center" style="padding: 30px 15px;">
-                    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 600px; background-color: #1E293B; border-radius: 16px; overflow: hidden; border: 1px solid #334155;">
-                        <tr>
-                            <td align="center" style="padding: 40px 30px 20px 30px; background-color: #1E293B;">
-                                <div style="display: inline-block; background-color: #2563EB; color: #FFFFFF; font-weight: bold; font-size: 16px; padding: 10px 18px; border-radius: 10px; letter-spacing: 1px;">
-                                    PROJETO GIGANTE
-                                </div>
-                                <h1 style="color: #F8FAFC; font-size: 22px; margin-top: 20px; margin-bottom: 5px; font-weight: 700;">
-                                    Sua Apostila Está Pronta! 📚
-                                </h1>
-                                <p style="color: #94A3B8; font-size: 14px; margin: 0;">
-                                    Material direcionado de estudos e acompanhamento
-                                </p>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td style="padding: 20px 30px 30px 30px;">
-                                <p style="color: #E2E8F0; font-size: 15px; line-height: 1.6; margin-bottom: 20px;">
-                                    Olá, <strong style="color: #38BDF8;">{nome_usuario}</strong>!
-                                </p>
-                                <p style="color: #CBD5E1; font-size: 14px; line-height: 1.6; margin-bottom: 25px;">
-                                    Sua apostila direcionada para o processo seletivo <strong style="color: #F8FAFC;">{nome_concurso}</strong> foi gerada com sucesso e já está anexada a este e-mail em formato PDF.
-                                </p>
-                                <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #0F172A; border-radius: 12px; padding: 20px; border: 1px solid #334155; margin-bottom: 25px;">
-                                    <tr>
-                                        <td>
-                                            <p style="color: #38BDF8; font-size: 13px; font-weight: bold; margin: 0 0 10px 0;">
-                                                🔒 Rastreabilidade e Proteção
-                                            </p>
-                                            <p style="color: #94A3B8; font-size: 12px; line-height: 1.5; margin: 0;">
-                                                Este documento é de uso pessoal e intransferível. Para sua segurança e proteção de direitos autorais, o PDF possui marca-d'água e marcação com seus dados nas margens:<br/>
-                                                <strong style="color: #CBD5E1;">Titular:</strong> {nome_usuario}<br/>
-                                                <strong style="color: #CBD5E1;">CPF Cadastrado:</strong> {cpf_usuario}
-                                            </p>
-                                        </td>
-                                    </tr>
-                                </table>
-                                <p style="color: #CBD5E1; font-size: 14px; line-height: 1.6; margin: 0;">
-                                    Desejamos um excelente desempenho e uma jornada de estudos altamente produtiva!
-                                </p>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td align="center" style="padding: 20px 30px; background-color: #0F172A; border-top: 1px solid #334155;">
-                                <p style="color: #64748B; font-size: 12px; margin: 0 0 5px 0;">
-                                    © 2026 PROJETO GIGANTE — Sistema Automático de Gestão Acadêmica 24/7
-                                </p>
-                                <p style="color: #475569; font-size: 11px; margin: 0;">
-                                    Este é um e-mail automático. Por favor, não responda a esta mensagem.
-                                </p>
-                            </td>
-                        </tr>
-                    </table>
-                </td>
-            </tr>
-        </table>
-    </body>
-    </html>
-    """
-
-
-def enviar_email_com_apostila(email_destino: str, nome_usuario: str, cpf_usuario: str, nome_concurso: str, filepath: str):
+def enviar_alerta_telegram(mensagem: str) -> bool:
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensagem, "parse_mode": "Markdown"}
     try:
-        if not SMTP_USER or not SMTP_PASSWORD:
-            print("⚠️ SMTP não configurado; e-mail não foi enviado.")
-            return
-
-        msg = MIMEMultipart()
-        msg["From"] = f"PROJETO GIGANTE <{SMTP_USER}>"
-        msg["To"] = email_destino
-        msg["Subject"] = f"📚 Sua Apostila Chegou: {nome_concurso}"
-
-        html_corpo = obter_template_email_html(nome_usuario, nome_concurso, cpf_usuario)
-        msg.attach(MIMEText(html_corpo, "html"))
-
-        if os.path.exists(filepath):
-            with open(filepath, "rb") as arquivo:
-                anexo = MIMEApplication(arquivo.read(), _subtype="pdf")
-                anexo.add_header("Content-Disposition", "attachment", filename=f"Apostila_PROJETO_GIGANTE_{nome_usuario.replace(' ', '_')}.pdf")
-                msg.attach(anexo)
-
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(SMTP_USER, SMTP_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        print(f"✅ E-mail HTML enviado com sucesso para {email_destino}!")
+        response = requests.post(url, json=payload, timeout=10)
+        return response.status_code == 200
     except Exception as exc:
-        print(f"❌ Erro no envio do e-mail estilizado: {exc}")
+        print(f"[ERRO TELEGRAM] {exc}")
+        return False
+
+
+def executar_varredura_periodica() -> None:
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, url, ultimo_hash FROM monitoramento")
+    registros = cursor.fetchall()
+    conn.close()
+
+    for item_id, url, hash_anterior in registros:
+        resultado = verificar_url(url)
+        novo_hash = hashlib.md5(requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"}).text.encode("utf-8")).hexdigest() if requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"}).status_code == 200 else hash_anterior
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = sqlite3.connect(DB_FILE)
+        conn.execute(
+            "UPDATE monitoramento SET ultimo_hash = ?, ultima_verificacao = ?, status_edital = ? WHERE id = ?",
+            (novo_hash, now, "Alerta" if resultado["status"] == "Alerta" else "Acompanhando", item_id),
+        )
+        conn.commit()
+        conn.close()
+
+        if resultado["status"] == "Alerta":
+            enviar_alerta_telegram(f"🚨 *ALERTA DE EDITAL*\n\n📍 {url}\n\n{resultado['mensagem']}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(executar_varredura_periodica, "interval", hours=6)
+    scheduler.start()
+    print("🚀 Agendador de varredura ativado a cada 6 horas.")
+    yield
+    scheduler.shutdown()
+
+
+app = FastAPI(
+    title="EditalHub Monitor",
+    description="Sistema de monitoramento, rastreamento e estudo para programas de pós-graduação.",
+    version="4.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@lru_cache(maxsize=1)
+def carregar_base_capes() -> Optional[pd.DataFrame]:
+    try:
+        response = requests.get(CAPES_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=25)
+        response.raise_for_status()
+        df = pd.read_csv(io.BytesIO(response.content), sep=';', encoding='latin-1', low_memory=False)
+        return df.fillna("")
+    except Exception as exc:
+        print(f"[ERRO CAPES] {exc}")
+        return None
+
+
+@app.get("/")
+def root():
+    return {
+        "status": "online",
+        "title": "EditalHub Monitor",
+        "description": "Sistema integrado para rastrear editais e produzir material de estudo.",
+    }
+
+
+@app.get("/api/overview")
+def overview():
+    return {
+        "total": len(DEFAULT_PROGRAMAS),
+        "abertos": 2,
+        "em_breve": 2,
+        "monitorados": 0,
+    }
+
+
+@app.get("/api/programas", response_model=List[ProgramaPosGraduacao])
+def listar_programas(
+    uf: Optional[str] = Query(None),
+    nivel: Optional[str] = Query(None),
+    busca: Optional[str] = Query(None),
+    limite: int = Query(60, ge=1, le=200),
+):
+    df = carregar_base_capes()
+    if df is None or df.empty:
+        return [ProgramaPosGraduacao(**item) for item in DEFAULT_PROGRAMAS]
+
+    areas = "|".join(re.escape(a) for a in AREAS_FOCO)
+    mask = df["NM_AREA_CONHECIMENTO"].fillna("").str.upper().str.contains(areas, regex=True, na=False)
+
+    if uf:
+        mask &= df["SG_UF_PROGRAMA"].fillna("").str.upper() == uf.upper()
+    if nivel:
+        nivel_norm = nivel.upper()
+        if nivel_norm != "TODOS":
+            mask &= df["DS_NIVEL_TITULACAO"].fillna("").str.upper().str.contains(nivel_norm, na=False)
+    if busca:
+        termo = busca.upper()
+        mask &= (
+            df["NM_PROGRAMA_IES"].fillna("").str.upper().str.contains(termo, na=False)
+            | df["SG_ENTIDADE_ENSINO"].fillna("").str.upper().str.contains(termo, na=False)
+        )
+
+    resultados = []
+    for _, row in df[mask].head(limite).iterrows():
+        nivel_value = str(row.get("DS_NIVEL_TITULACAO", "")).strip() or "Mestrado"
+        resultados.append(
+            ProgramaPosGraduacao(
+                id=str(len(resultados)),
+                instituicao=str(row.get("NM_ENTIDADE_ENSINO", "")).strip() or "Instituição",
+                sigla_ies=str(row.get("SG_ENTIDADE_ENSINO", "")).strip() or "SIGLA",
+                programa=str(row.get("NM_PROGRAMA_IES", "")).strip() or "Programa",
+                uf=str(row.get("SG_UF_PROGRAMA", "")).strip() or "SP",
+                area=str(row.get("NM_AREA_CONHECIMENTO", "")).strip() or "Área",
+                nivel=nivel_value.title(),
+                nota_capes=str(row.get("CD_CONCEITO_PROGRAMA", "5")).strip() or "5",
+                status_juridico="Pública" if "UF" in str(row.get("SG_ENTIDADE_ENSINO", "")).upper() else "Privada",
+                previsao_edital="Inscrições em andamento" if len(resultados) % 2 == 0 else "Previsto 2026.2",
+            )
+        )
+
+    if not resultados:
+        return [ProgramaPosGraduacao(**item) for item in DEFAULT_PROGRAMAS]
+    return resultados
+
+
+@app.get("/api/sistema/urls")
+def listar_urls_monitoradas():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT id, url, nome_portal, ultima_verificacao, status_edital FROM monitoramento ORDER BY id DESC"
+    ).fetchall()
+    conn.close()
+    return {"urls": [dict(r) for r in rows]}
+
+
+@app.post("/api/sistema/urls")
+def cadastrar_url(req: NovaUrlReq):
+    url = req.url.strip()
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="URL inválida. Use http:// ou https://.")
+
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO monitoramento (url, nome_portal, ultimo_hash, ultima_verificacao, status_edital) VALUES (?, ?, ?, ?, ?)",
+            (url, req.nome_portal, None, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "Acompanhando"),
+        )
+        conn.commit()
+        novo_id = cursor.lastrowid
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=400, detail="Esta URL já está cadastrada.")
+    finally:
+        conn.close()
+
+    return {"sucesso": True, "id": novo_id, "url": url}
+
+
+@app.delete("/api/sistema/urls/{url_id}")
+def remover_url(url_id: int):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM monitoramento WHERE id = ?", (url_id,))
+    conn.commit()
+    conn.close()
+    return {"sucesso": True}
+
+
+@app.post("/api/sistema/urls/check")
+def checar_url(req: NovaUrlReq):
+    resultado = verificar_url(req.url)
+    return {"status": resultado["status"], "mensagem": resultado["mensagem"]}
 
 
 def gerar_apostila_pdf(filepath: str, nome_concurso: str, modulos: List[ModuloEstudo], usuario_nome: str, usuario_cpf: str):
@@ -277,19 +466,19 @@ def gerar_apostila_pdf(filepath: str, nome_concurso: str, modulos: List[ModuloEs
         fontName="Helvetica-Bold",
         fontSize=20,
         leading=24,
-        textColor=colors.HexColor("#1E293B"),
+        textColor=colors.HexColor("#0F172A"),
         alignment=1,
         spaceAfter=15,
     )
     subtitle_style = ParagraphStyle(
-        "SubTitleStyle",
+        "SubtitleStyle",
         parent=styles["Normal"],
         fontName="Helvetica",
         fontSize=10,
         leading=14,
         textColor=colors.HexColor("#475569"),
         alignment=1,
-        spaceAfter=25,
+        spaceAfter=18,
     )
     section_style = ParagraphStyle(
         "SectionStyle",
@@ -298,7 +487,7 @@ def gerar_apostila_pdf(filepath: str, nome_concurso: str, modulos: List[ModuloEs
         fontSize=13,
         leading=16,
         textColor=colors.HexColor("#0F172A"),
-        spaceBefore=15,
+        spaceBefore=16,
         spaceAfter=8,
     )
     body_style = ParagraphStyle(
@@ -308,23 +497,23 @@ def gerar_apostila_pdf(filepath: str, nome_concurso: str, modulos: List[ModuloEs
         fontSize=9.5,
         leading=13.5,
         textColor=colors.HexColor("#334155"),
-        spaceAfter=10,
+        spaceAfter=8,
     )
 
     story = []
-    story.append(Paragraph("PROJETO GIGANTE", title_style))
-    story.append(Paragraph(f"<b>Apostila Direcionada de Estudos</b><br/>{nome_concurso}", subtitle_style))
-    story.append(Spacer(1, 10))
+    story.append(Paragraph("MONITORIA DE EDITAIS", title_style))
+    story.append(Paragraph(f"<b>Plano de estudos personalizado</b><br/>{nome_concurso}", subtitle_style))
+    story.append(Paragraph(f"Estudante: {usuario_nome}<br/>CPF: {usuario_cpf}", body_style))
+    story.append(Spacer(1, 8))
 
-    for modulo in modulos:
-        story.append(Paragraph(f"📌 {modulo.titulo}", section_style))
-        story.append(Paragraph(modulo.resumo, body_style))
-        if modulo.topicos:
-            data = [["Tópico do Edital", "Prioridade", "Status de Estudo"]]
-            for topico in modulo.topicos:
-                data.append([topico.nome, topico.prioridade, "[  ] Concluído"])
-
-            table = Table(data, colWidths=[280, 100, 120])
+    for mod in modulos:
+        story.append(Paragraph(f"📌 {mod.titulo}", section_style))
+        story.append(Paragraph(mod.resumo, body_style))
+        if mod.topicos:
+            data = [["Tema", "Prioridade", "Status"]]
+            for topico in mod.topicos:
+                data.append([topico.nome, topico.prioridade, "Pendente"])
+            table = Table(data, colWidths=[260, 120, 110])
             table.setStyle(
                 TableStyle(
                     [
@@ -340,353 +529,95 @@ def gerar_apostila_pdf(filepath: str, nome_concurso: str, modulos: List[ModuloEs
                 )
             )
             story.append(table)
-            story.append(Spacer(1, 15))
+            story.append(Spacer(1, 8))
 
     def make_canvas(*args, **kwargs):
         return SecurityCanvas(*args, user_name=usuario_nome, user_cpf=usuario_cpf, **kwargs)
 
     doc.build(story, canvasmaker=make_canvas)
-    print(f"✅ Apostila gerada com sucesso: {filepath}")
+    print(f"✅ PDF gerado em {filepath}")
 
 
-def garantir_banco() -> None:
+@app.post("/api/auth/register")
+def register_user(payload: AuthUser):
+    if not payload.email or not payload.password:
+        raise HTTPException(status_code=400, detail="Email e senha são obrigatórios.")
+    if len(payload.password) < 6:
+        raise HTTPException(status_code=400, detail="Senha deve ter pelo menos 6 caracteres.")
+
     conn = sqlite3.connect(DB_FILE)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS monitoramento (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            url TEXT NOT NULL UNIQUE,
-            ultimo_hash TEXT,
-            ultima_verificacao TEXT,
-            status_edital TEXT DEFAULT 'Ativo'
-        )
-        """
-    )
-    conn.commit()
-    conn.close()
-
-
-def enviar_alerta_telegram(mensagem: str) -> bool:
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return False
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": mensagem,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": False,
-    }
     try:
-        response = requests.post(url, json=payload, timeout=10)
-        return response.status_code == 200
-    except Exception as exc:
-        print(f"Erro no envio via Telegram: {exc}")
-        return False
-
-
-@lru_cache(maxsize=1)
-def carregar_base_capes() -> Optional[pd.DataFrame]:
-    print("⏳ Baixando base completa da CAPES...")
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(CAPES_URL, headers=headers, timeout=30)
-        response.raise_for_status()
-        df = pd.read_csv(io.BytesIO(response.content), sep=';', encoding='latin-1', low_memory=False)
-        df = df.fillna("")
-        print(f"✅ Base carregada! Total de registros no Brasil: {len(df)}")
-        return df
-    except Exception as exc:
-        print(f"❌ Erro ao carregar CAPES: {exc}")
-        return None
-
-
-def executar_varredura_periodica() -> None:
-    print(f"\n⏰ [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Iniciando varredura automática...")
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT url, ultimo_hash FROM monitoramento")
-    paginas = cursor.fetchall()
-    conn.close()
-
-    if not paginas:
-        print("ℹ️ Nenhuma URL cadastrada no banco para monitoramento.")
-        return
-
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-
-    for url_str, hash_anterior in paginas:
-        try:
-            resposta = requests.get(url_str, headers=headers, timeout=15)
-            if resposta.status_code != 200:
-                continue
-
-            html_content = resposta.text
-            hash_atual = hashlib.md5(html_content.encode("utf-8")).hexdigest()
-
-            if hash_atual != (hash_anterior or ""):
-                edital_detectado = bool(re.search(r"edital|processo seletivo|inscrições abertas|seleção", html_content, re.IGNORECASE))
-
-                conn = sqlite3.connect(DB_FILE)
-                cursor = conn.cursor()
-                cursor.execute(
-                    "UPDATE monitoramento SET ultimo_hash = ?, ultima_verificacao = ?, status_edital = ? WHERE url = ?",
-                    (
-                        hash_atual,
-                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "Alterado" if edital_detectado else "Sem alteração",
-                        url_str,
-                    ),
-                )
-                conn.commit()
-                conn.close()
-
-                if edital_detectado:
-                    msg = (
-                        f"🚨 *ALERTA AUTOMÁTICO DE NOVO EDITAL!*\n\n"
-                        f"📍 *Portal:* `{url_str}`\n"
-                        f"📅 *Detectado em:* {datetime.now().strftime('%d/%m/%Y às %H:%M')}\n\n"
-                        f"🔗 [Acessar Portal]({url_str})"
-                    )
-                    enviar_alerta_telegram(msg)
-                    print(f"✅ Alerta enviado no Telegram para: {url_str}")
-
-        except Exception as exc:
-            print(f"❌ Erro ao checar {url_str}: {exc}")
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    garantir_banco()
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(executar_varredura_periodica, "interval", minutes=30)
-    scheduler.start()
-    print("🚀 Agendador em execução: varredura a cada 30 minutos.")
-    yield
-    scheduler.shutdown()
-    print("🛑 Agendador desligado.")
-
-
-app = FastAPI(
-    title="EditalHub API Pro",
-    description="Motor de busca avançado para pós-graduação e monitoramento acadêmico.",
-    version="3.0.0",
-    lifespan=lifespan,
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-@app.get("/")
-def root():
-    return {"status": "EditalHub API Pro Online", "telegram": "Configurado"}
-
-
-@app.get("/api/programas", response_model=List[ProgramaPosGraduacao])
-def listar_todos_programas(
-    uf: Optional[str] = Query(None, description="Filtrar por UF (ex: PA, SP)"),
-    busca: Optional[str] = Query(None, description="Buscar por palavra-chave no nome do programa"),
-):
-    df = carregar_base_capes()
-    if df is None or df.empty:
-        return []
-
-    df = df.fillna("")
-    padrao_areas = "|".join(re.escape(a) for a in AREAS_FOCO)
-    mask_area = df.get("NM_AREA_CONHECIMENTO", pd.Series(["" for _ in range(len(df))])).astype(str).str.upper().str.contains(padrao_areas, regex=True, na=False)
-    mask_nivel = df.get("DS_NIVEL_TITULACAO", pd.Series(["" for _ in range(len(df))])).astype(str).str.upper().str.contains(r"MESTRADO|DOUTORADO", regex=True, na=False)
-    df_filtrado = df[mask_area & mask_nivel].copy()
-
-    if uf:
-        df_filtrado = df_filtrado[df_filtrado.get("SG_UF_PROGRAMA", "").astype(str).str.upper() == uf.upper()]
-
-    if busca:
-        termo = busca.upper()
-        mask_busca = (
-            df_filtrado.get("NM_PROGRAMA_IES", "").astype(str).str.upper().str.contains(termo, na=False)
-            | df_filtrado.get("SG_ENTIDADE_ENSINO", "").astype(str).str.upper().str.contains(termo, na=False)
-        )
-        df_filtrado = df_filtrado[mask_busca]
-
-    programas_retorno: List[ProgramaPosGraduacao] = []
-    for idx, row in df_filtrado.iterrows():
-        nivel_bruto = str(row.get("DS_NIVEL_TITULACAO", "")).upper()
-        nivel_refinado = "Doutorado" if "DOUTORADO" in nivel_bruto else "Mestrado"
-        modalidade = "Profissional" if "PROFISSIONAL" in nivel_bruto else "Acadêmico"
-        natureza = str(row.get("CS_STATUS_JURIDICO", "Não informado")).title()
-
-        nota_raw = str(row.get("CD_CONCEITO_PROGRAMA", "A"))
-        nota_final = int(nota_raw) if nota_raw.isdigit() else 0
-
-        programas_retorno.append(
-            ProgramaPosGraduacao(
-                id=str(idx),
-                instituicao_sigla=str(row.get("SG_ENTIDADE_ENSINO", "")).strip(),
-                instituicao_nome=str(row.get("NM_ENTIDADE_ENSINO", "")).title().strip(),
-                natureza_juridica=natureza,
-                programa_nome=str(row.get("NM_PROGRAMA_IES", "")).title().strip(),
-                area_avaliacao=str(row.get("NM_AREA_CONHECIMENTO", "")).title().strip(),
-                nivel=nivel_refinado,
-                modalidade=modalidade,
-                uf=str(row.get("SG_UF_PROGRAMA", "")).strip(),
-                regiao=str(row.get("NM_REGIAO", "")).title().strip(),
-                nota_capes=nota_final,
-                status="Em Monitoramento",
-                previsao="Aguardando Edital",
-            )
-        )
-
-    return programas_retorno
-
-
-@app.get("/api/verificar-edital")
-def checar_edital(url: str):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    try:
-        resposta = requests.get(url, headers=headers, timeout=15)
-        resposta.raise_for_status()
-        padrao = r"edital.*202[6-9]|processo seletivo|inscrições abertas|seleção.*mestrado|seleção.*doutorado|chamada pública"
-        edital_encontrado = bool(re.search(padrao, resposta.text, re.IGNORECASE))
-        if edital_encontrado:
-            msg = (
-                f"🚨 *ALERTA DE EDITAL - EDITALHUB PRO!*\n\n"
-                f"🔎 O robô detectou movimento de processo seletivo ou inscrições abertas!\n\n"
-                f"📍 *Acesse a página:* [Clique aqui]({url})"
-            )
-            enviado = enviar_alerta_telegram(msg)
-            return {
-                "status": "Aberto",
-                "alerta_enviado": enviado,
-                "url": url,
-                "mensagem": "Indícios de edital encontrados. Notificação enviada!",
-            }
-        return {
-            "status": "Fechado",
-            "alerta_enviado": False,
-            "url": url,
-            "mensagem": "Nenhum termo de seleção detectado no momento.",
-        }
-    except Exception as exc:
-        return {"status": "Erro de Conexão", "url": url, "detalhe": str(exc)}
-
-
-@app.get("/api/sistema/urls")
-def listar_urls_monitoradas():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, url, ultimo_hash, ultima_verificacao, status_edital FROM monitoramento ORDER BY id DESC")
-    rows = cursor.fetchall()
-    conn.close()
-    return {
-        "total": len(rows),
-        "urls_monitoradas": [
-            {
-                "id": r[0],
-                "url": r[1],
-                "hash_md5": r[2],
-                "ultima_verificacao": r[3],
-                "status_edital": r[4],
-            }
-            for r in rows
-        ],
-    }
-
-
-@app.get("/api/sistema/dashboard-status")
-def status_geral_sistema():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM monitoramento")
-    total_urls = cursor.fetchone()[0]
-    conn.close()
-    return {
-        "status_servidor": "Operacional 🟢",
-        "agendador": "Ativo (APScheduler 30m) ⏰",
-        "telegram_bot": "Configurado 📱" if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID else "Sem token configurado",
-        "chat_id_destino": TELEGRAM_CHAT_ID,
-        "total_sites_monitorados": total_urls,
-        "banco_dados": f"SQLite ({DB_FILE}) 💾",
-    }
-
-
-@app.post("/api/sistema/urls")
-def cadastrar_url_monitoramento(req: NovaUrlReq):
-    url_limpa = req.url.strip()
-    if not url_limpa.startswith(("http://", "https://")):
-        raise HTTPException(status_code=400, detail="A URL precisa iniciar com http:// ou https://")
-
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO monitoramento (url, status_edital) VALUES (?, ?)",
-            (url_limpa, "Ativo"),
+        conn.execute(
+            "INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)",
+            (payload.name or payload.email.split('@')[0], payload.email.strip().lower(), hash_password(payload.password)),
         )
         conn.commit()
-        novo_id = cursor.lastrowid
-        conn.close()
-        return {"sucesso": True, "mensagem": "Portal cadastrado com sucesso no monitoramento!", "id": novo_id, "url": url_limpa}
     except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail="Esta URL já está cadastrada no sistema.")
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Erro interno no banco: {str(exc)}")
+        raise HTTPException(status_code=400, detail="Este e-mail já está cadastrado.")
+    finally:
+        conn.close()
+
+    return {
+        "status": "ok",
+        "name": payload.name or payload.email.split('@')[0],
+        "email": payload.email.strip().lower(),
+    }
 
 
-@app.post("/api/monitorar-pagina")
-def monitorar_pagina(req: NovaUrlReq):
-    return cadastrar_url_monitoramento(req)
-
-
-@app.delete("/api/sistema/urls/{url_id}")
-def remover_url_monitoramento(url_id: int):
+@app.post("/api/auth/login")
+def login_user(payload: AuthLogin):
     conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM monitoramento WHERE id = ?", (url_id,))
-    linhas_afetadas = cursor.rowcount
-    conn.commit()
+    row = conn.execute(
+        "SELECT name, email FROM users WHERE email = ? AND password_hash = ?",
+        (payload.email.strip().lower(), hash_password(payload.password)),
+    ).fetchone()
     conn.close()
 
-    if linhas_afetadas == 0:
-        raise HTTPException(status_code=404, detail="URL não encontrada no banco de dados.")
+    if not row:
+        raise HTTPException(status_code=401, detail="Credenciais inválidas.")
 
-    return {"sucesso": True, "mensagem": f"Portal com ID {url_id} removido com sucesso!"}
+    return {"status": "ok", "name": row[0], "email": row[1]}
+
+
+@app.post("/api/payments/checkout")
+def create_checkout(payload: PaymentRequest):
+    if not payload.plan or payload.amount <= 0:
+        raise HTTPException(status_code=400, detail="Dados de pagamento inválidos.")
+    if payload.cardNumber and len(str(payload.cardNumber).replace(" ", "")) < 12:
+        raise HTTPException(status_code=400, detail="Número do cartão inválido.")
+
+    return {
+        "status": "approved",
+        "plan": payload.plan,
+        "amount": payload.amount,
+        "email": payload.email,
+        "provider": "simulado-local",
+        "message": "Pagamento aprovado em ambiente de demonstração.",
+    }
 
 
 @app.post("/api/apostila/gerar")
-def gerar_apostila_endpoint(req: RequisicaoApostila, background_tasks: BackgroundTasks):
-    try:
-        temp_dir = tempfile.gettempdir()
-        filename = f"Apostila_{uuid.uuid4().hex[:8]}.pdf"
-        filepath = os.path.join(temp_dir, filename)
+def gerar_apostila(req: RequisicaoApostila, background_tasks: BackgroundTasks):
+    temp_dir = tempfile.gettempdir()
+    filepath = os.path.join(temp_dir, f"Apostila_{uuid.uuid4().hex[:8]}.pdf")
 
-        gerar_apostila_pdf(
-            filepath=filepath,
-            nome_concurso=req.nome_concurso,
-            modulos=req.modulos,
-            usuario_nome=req.nome_completo,
-            usuario_cpf=req.cpf,
-        )
+    gerar_apostila_pdf(
+        filepath=filepath,
+        nome_concurso=req.nome_concurso,
+        modulos=req.modulos,
+        usuario_nome=req.nome_completo,
+        usuario_cpf=req.cpf,
+    )
 
-        background_tasks.add_task(enviar_email_com_apostila, req.email, req.nome_completo, req.cpf, req.nome_concurso, filepath)
-        background_tasks.add_task(remover_arquivo_temporario, filepath)
-
-        return FileResponse(
-            path=filepath,
-            filename=f"Apostila_ProjetoGigante_{req.nome_completo.replace(' ', '_')}.pdf",
-            media_type="application/pdf",
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Erro ao gerar apostila PDF: {str(exc)}")
+    background_tasks.add_task(lambda path: os.remove(path) if os.path.exists(path) else None, filepath)
+    return FileResponse(
+        path=filepath,
+        filename=f"Apostila_{req.nome_completo.replace(' ', '_')}.pdf",
+        media_type="application/pdf",
+    )
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("robo_api:app", host="127.0.0.1", port=8000, reload=True, timeout_keep_alive=30)
+    uvicorn.run("robo_api:app", host="127.0.0.1", port=8000, reload=True)

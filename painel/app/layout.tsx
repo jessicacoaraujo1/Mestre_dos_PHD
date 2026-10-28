@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import React from 'react';
+import './globals.css';
 
 export const metadata: Metadata = {
   title: 'Edital Hub · Monitor de Doutorados',
@@ -9,7 +10,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="pt-BR">
-      <body style={{ margin: 0, padding: 0, backgroundColor: '#F5F5F7' }}>{children}</body>
+      <body>{children}</body>
     </html>
   );
 }

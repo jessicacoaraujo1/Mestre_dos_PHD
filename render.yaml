@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: editalhub-api
+    env: python
+    rootDir: .
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn robo_api:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+      - key: DB_FILE
+        value: "editalhub.db"
+
+  - type: web
+    name: editalhub-web
+    env: node
+    rootDir: painel
+    buildCommand: "npm install && npm run build"
+    startCommand: "npm start -- --hostname 0.0.0.0 --port $PORT"
+    envVars:
+      - key: NODE_VERSION
+        value: "18.0.0"
+      - key: NEXT_PUBLIC_API_URL
+        value: "https://editalhub-api.onrender.com"
